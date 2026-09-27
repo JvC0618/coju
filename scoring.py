@@ -43,8 +43,9 @@ def commute_score(times, cap_min=90):
 def budget_score(cost, budget, tolerance=.5):
     if cost is None or cost <= 0 or not budget:
         return .5
-    # Budget is a ceiling: an affordable venue should not lose to an expensive one.
-    return max(0.0, 1 - max(0, cost-budget)/(budget*tolerance))
+    # Budget is a target: the closer the per-person cost is to the target, the better.
+    # Both overshooting and undershooting reduce the score symmetrically.
+    return max(0.0, 1 - abs(cost - budget) / (budget * tolerance))
 
 
 def rating_score(rating):

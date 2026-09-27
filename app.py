@@ -89,7 +89,7 @@ with st.sidebar:
                                    disabled=demo,
                                    help="公共交通优先：无公交方案时，仅尝试短途步行或骑行。不会自动改为驾车。")
     transport = amap.TRANSPORT_OPTIONS[transport_label]
-    budget = st.number_input("人均预算上限（元）", 20, 1000, 90, 10, key="budget")
+    budget = st.number_input("人均预算目标（元）", 20, 1000, 90, 10, key="budget")
     st.subheader("② 菜系与场景")
     categories = st.multiselect("先选菜系分类", list(CUISINE_CATEGORIES),
                                 default=["中餐 · 地方菜"], key="cuisine_categories")
@@ -119,9 +119,20 @@ location_signature = digest({"members": members, "city": city, "demo": demo,
 resolved_members = deepcopy(members)
 confirmed = demo
 if not demo:
-    st.subheader("核对出发地点")
-    st.caption("核对名称和地址，避免重名地点或模糊地址影响计算。")
-    if st.button("核对出发地点", key="resolve", disabled=not bool(config.get_amap_key())):
+    st.subheader("出发地点")
+    verify_mode = st.radio(
+        "地点识别方式", ["逐一核对（更准确）", "自动识别（跳过核对）"],
+        key="verify_mode",
+        help="逐一核对：为每位成员从候选中选择正确地点，避免重名/模糊地址；自动识别：直接用高德唯一精确匹配，更快，但地址需足够具体。")
+    auto_mode = verify_mode.startswith("自动")
+
+    if auto_mode:
+        # 自动识别: 不弹逐人选项, 生成时自动地理编码; 地址模糊会报错
+        st.caption("将自动识别每位成员填写的地点；若某地点无法唯一确定会提示改用逐一核对。")
+        confirmed = all(m.get("location") for m in members)
+        if not confirmed:
+            st.caption("请填写所有成员的出发地点。")
+    elif st.button("核对出发地点", key="resolve", disabled=not bool(config.get_amap_key())):
         st.session_state.pop("result", None)
         st.session_state.pop("location_options", None)
         try:
@@ -170,10 +181,13 @@ if go:
     st.session_state.pop("result", None)
     try:
         with st.spinner("正在查询餐厅与路线，请稍候…"):
-            candidates, source, diagnostics = amap.build_candidates(resolved_members, city, cuisine_sel, transport)
+            members_for_plan = resolved_members
+            if not demo and st.session_state.get("verify_mode", "").startswith("自动"):
+                members_for_plan = amap.auto_resolve_members(members, city)
+            candidates, source, diagnostics = amap.build_candidates(members_for_plan, city, cuisine_sel, transport)
             st.session_state["result"] = {
                 "signature": input_signature, "candidates": candidates, "source": source,
-                "diagnostics": diagnostics, "members": deepcopy(resolved_members),
+                "diagnostics": diagnostics, "members": deepcopy(members_for_plan),
                 "demo": demo, "entertainment": {}, "city": city, "transport": transport,
             }
     except amap.PlanningError as exc:
@@ -211,6 +225,14 @@ if res:
                 with st.expander(f"#{i} {cand['venue']} · {cand['total']:.3f}{matched_label}", expanded=i == 1):
                     st.write(cand["address"] or cand["neighborhood"])
                     st.write(f"通勤差距 {cand['commute_gap_min']} 分钟 · 平均 {cand['avg_commute_min']} 分钟")
+                    _cost = cand.get("cost")
+                    _rating = cand.get("rating")
+                    _info = []
+                    _info.append(f"人均 {int(_cost)} 元" if _cost else "人均 暂无")
+                    _info.append(f"评分 {_rating}/5" if _rating else "评分 暂无")
+                    if cand.get("hours"):
+                        _info.append(f"营业 {cand['hours']}")
+                    st.write(" · ".join(_info))
                     st.write("**各成员出行路线**" + ("（模拟示例）" if demo else ""))
                     downgraded = []
                     for member, route in zip(res["members"], cand["commute_routes"]):

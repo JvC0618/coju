@@ -243,6 +243,29 @@ def search_restaurants(center, radius=3000, keyword="餐厅", limit=20, city="�
     return [_venue(p) for p in _request(path, params).get("pois") or [] if _same_city(p, city)]
 
 
+def auto_resolve_members(members, city="上海"):
+    """
+    可选的"跳过人工核对"路径: 对每位成员的文本地址自动地理编码,
+    取唯一且足够精确的匹配, 就地写入 lnglat/citycode 等字段。
+    与逐人核对相比: 不弹选项让用户挑, 但仍要求地址能唯一精确定位;
+    地址模糊/多义/跨城时抛 PlanningError, 绝不使用示例坐标兜底。
+    返回处理后的 members 副本。
+    """
+    resolved = deepcopy(members)
+    for i, m in enumerate(resolved, 1):
+        addr = _text(m.get("location"))
+        if not addr:
+            raise PlanningError(f"请填写成员{i}的出发地点。")
+        g = geocode_full(addr, city)
+        if not g:
+            raise PlanningError(
+                f"成员{i}（{m.get('name') or ''}）的地点「{addr}」无法唯一识别。"
+                "请填写更具体的地铁站/建筑/门牌号，或改用「逐一核对」逐项选择。")
+        m.update({**g, "name": m.get("name"), "resolved_name": g["name"],
+                  "location": addr, "location_confirmed": True})
+    return resolved
+
+
 def _validate_members(members, city):
     if not 2 <= len(members) <= 8:
         raise PlanningError("请填写2至8位成员。")
