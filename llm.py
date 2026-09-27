@@ -1,89 +1,45 @@
-"""
-LLM 层 —— 两个职责:
-  parse_request(text)      自然语言 → 结构化参数 (JSON)
-  generate_plan(top, ...)  结构化打分结果 → 自然语言方案
-
-无 LLM_API_KEY 时自动用规则模板兜底, 保证不依赖外网也能完整 demo。
-"""
+"""Grounded presentation text; optional LLM parsing remains an unconnected extension."""
 import json
 import config
 
-try:
-    from openai import OpenAI
-    _HAS_SDK = True
-except Exception:
-    _HAS_SDK = False
 
-
-def _client():
-    if not _HAS_SDK or not config.LLM_API_KEY:
+def parse_request(text, fallback_members=None):
+    """Reserved extension. Current UI uses explicit form inputs, not this parser."""
+    if not config.LLM_API_KEY:
         return None
-    return OpenAI(api_key=config.LLM_API_KEY, base_url=config.LLM_BASE_URL)
-
-
-def parse_request(text, fallback_members):
-    """
-    自然语言描述 → 结构化参数。
-    返回 {members:[{name,location}], budget:int, prefs:[...], time:str}
-    无 LLM 时返回 fallback (界面已有的表单值)。
-    """
-    cli = _client()
-    if cli is None:
-        return None  # 调用方改用表单值
-    prompt = (
-        "从下面这段聚会描述里抽取结构化参数, 只返回JSON, 字段: "
-        "members(list of {name,location}), budget(人均预算,整数), "
-        "prefs(口味/场景偏好 list), time(时间描述). 描述: " + text
-    )
     try:
-        resp = cli.chat.completions.create(
+        from openai import OpenAI
+        client = OpenAI(api_key=config.LLM_API_KEY, base_url=config.LLM_BASE_URL, timeout=20)
+        response = client.chat.completions.create(
             model=config.LLM_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0,
-        )
-        return json.loads(resp.choices[0].message.content)
-    except Exception as e:
-        print("LLM parse error:", e)
+            messages=[{"role": "system", "content": "只提取用户提供的聚会参数为JSON，不添加事实。字段members、budget、prefs、time。"},
+                      {"role": "user", "content": text}],
+            response_format={"type": "json_object"}, temperature=0)
+        return json.loads(response.choices[0].message.content)
+    except Exception:
         return None
 
 
 def generate_plan(top_candidates, members, budget, prefs):
-    """
-    Top候选明细 → 自然语言方案。无 LLM 时用规则模板。
-    """
-    cli = _client()
+    """Use the scored facts only; never assert a city-wide fairness optimum."""
+    if not top_candidates:
+        return "本次没有找到满足条件且通勤数据完整的候选，请调整条件后重试。"
     best = top_candidates[0]
-    if cli is not None:
-        prompt = (
-            "你是聚会规划助手。基于以下打分结果, 用自然、友好的中文写一段聚会方案, "
-            "包含: 推荐集合商圈及原因(强调通勤公平)、推荐餐厅(评分/人均/营业时间)、"
-            "以及一句话备选。数据: " + json.dumps(top_candidates, ensure_ascii=False)
-        )
-        try:
-            resp = cli.chat.completions.create(
-                model=config.LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-            )
-            return resp.choices[0].message.content
-        except Exception as e:
-            print("LLM plan error:", e)
-
-    # ---- 规则模板兜底 ----
-    lines = []
-    lines.append(f"🎯 推荐在 **{best['neighborhood']}** 集合。")
-    if best.get("commute_gap_min") is not None:
-        lines.append(
-            f"这里对大家最公平——三人通勤时间差距仅约 {best['commute_gap_min']} 分钟"
-            f"(平均 {best['avg_commute_min']} 分钟)。"
-        )
-    v = best["venue"]
-    parts = [f"🍽️ 推荐餐厅:**{v}**"]
-    lines.append("，".join(parts) + "。")
-    lines.append(f"综合评分 {best['total']}（公平性 {best['scores']['fairness']}、"
-                 f"评分 {best['scores']['rating']}、偏好匹配 {best['scores']['pref']}）。")
+    lines = [f"建议在 **{best['venue']}** 集合（{best['neighborhood']}）。",
+             f"按当前权重，它在本次有效候选中综合得分最高：**{best['total']:.3f}**。",
+             f"{len(members)}位成员的平均通勤时间为 **{best['avg_commute_min']} 分钟**，"
+             f"最长与最短相差 **{best['commute_gap_min']} 分钟**。"]
+    if best["commute_gap_min"] >= 30:
+        lines.append("通勤差距仍较大，可以比较其他候选或调整出发地点。")
+    cost = best.get("cost")
+    lines.append(f"人均参考消费：{f'{cost:g}元' if cost is not None and cost > 0 else '暂无数据'}；你的预算为{budget:g}元/人。")
+    if cost is not None and cost > budget:
+        lines.append("这家餐厅的人均参考消费高于预算，请注意比较。")
+    rating = best.get("rating")
+    lines.append(f"餐厅原始评分：{f'{rating:g}/5' if rating is not None and rating > 0 else '暂无数据'}；"
+                 f"营业时间：{best.get('hours') or '暂无数据，请向商家确认'}。")
     if len(top_candidates) > 1:
         alt = top_candidates[1]
-        lines.append(f"👉 备选:{alt['neighborhood']} · {alt['venue']}（总分 {alt['total']}）。")
+        lines.append(f"备选：**{alt['venue']}**（综合得分 {alt['total']:.3f}）。")
     return "\n\n".join(lines)
+
