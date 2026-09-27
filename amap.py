@@ -243,23 +243,54 @@ def search_restaurants(center, radius=3000, keyword="餐厅", limit=20, city="�
     return [_venue(p) for p in _request(path, params).get("pois") or [] if _same_city(p, city)]
 
 
+def _auto_resolve_one(address, city="上海"):
+    """
+    自动模式的宽松解析(比逐一核对更宽松, 图快):
+      1. 先取唯一精确的地理编码 (geocode_full)。
+      2. 精确匹配为0或多个时, 退一步用 POI 搜索, 取同城、地址包含关键词的
+         最相关第一个 (高德按相关度返回)。
+    仍要求: 同城 + 有有效坐标; 跨城/完全搜不到才失败。不使用示例坐标兜底。
+    成功返回地点 dict, 失败返回 None。
+    """
+    g = geocode_full(address, city)
+    if g:
+        return g
+    # 退一步: POI 文本搜索取最相关同城结果
+    query = _normalize(address)
+    try:
+        data = _request("place/text", {"keywords": address, "region": city,
+                                       "city_limit": "true", "page_size": 5})
+    except MapServiceError:
+        return None
+    for p in data.get("pois") or []:
+        point = _point(p.get("location"))
+        formatted = "".join(_text(p.get(k)) for k in ("cityname", "adname", "address"))
+        if not point or not _same_city(p, city):
+            continue
+        if query and query not in _normalize(_text(p.get("name")) + formatted):
+            continue
+        return {"id": _text(p.get("id")), "name": _text(p.get("name")),
+                "formatted_address": formatted, "lnglat": point,
+                "citycode": _text(p.get("citycode")), "adcode": _text(p.get("adcode")),
+                "level": "兴趣点", "city": city}
+    return None
+
+
 def auto_resolve_members(members, city="上海"):
     """
-    可选的"跳过人工核对"路径: 对每位成员的文本地址自动地理编码,
-    取唯一且足够精确的匹配, 就地写入 lnglat/citycode 等字段。
-    与逐人核对相比: 不弹选项让用户挑, 但仍要求地址能唯一精确定位;
-    地址模糊/多义/跨城时抛 PlanningError, 绝不使用示例坐标兜底。
-    返回处理后的 members 副本。
+    可选的"跳过人工核对"路径: 对每位成员的文本地址自动解析(宽松, 取最相关),
+    就地写入 lnglat/citycode 等字段。跨城/完全无法定位时抛 PlanningError,
+    绝不使用示例坐标兜底。返回处理后的 members 副本。
     """
     resolved = deepcopy(members)
     for i, m in enumerate(resolved, 1):
         addr = _text(m.get("location"))
         if not addr:
             raise PlanningError(f"请填写成员{i}的出发地点。")
-        g = geocode_full(addr, city)
+        g = _auto_resolve_one(addr, city)
         if not g:
             raise PlanningError(
-                f"成员{i}（{m.get('name') or ''}）的地点「{addr}」无法唯一识别。"
+                f"成员{i}（{m.get('name') or ''}）的地点「{addr}」在{city}无法定位。"
                 "请填写更具体的地铁站/建筑/门牌号，或改用「逐一核对」逐项选择。")
         m.update({**g, "name": m.get("name"), "resolved_name": g["name"],
                   "location": addr, "location_confirmed": True})
