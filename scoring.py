@@ -76,12 +76,22 @@ def rating_score(venue_rating):
     return min(1.0, venue_rating / 5.0)
 
 
-def pref_score(venue_tags, user_prefs):
-    """偏好匹配(软分): venue 标签与全部偏好(含场景)的重合度。"""
+def pref_score(venue, user_prefs):
+    """
+    偏好匹配(软分): venue 的名称+标签 与全部偏好(菜系+场景)的重合度。
+    用宽松匹配(去"菜"字), 与 venue_matches_cuisine 一致, 避免"菜系明明匹配却得0分"。
+    """
     if not user_prefs:
         return 0.5
-    venue_tags = venue_tags or []
-    hits = sum(1 for p in user_prefs if any(p in t or t in p for t in venue_tags))
+    if isinstance(venue, dict):
+        hay = (venue.get("name") or "") + " " + " ".join(venue.get("tags") or [])
+    else:
+        hay = str(venue or "")
+    hits = 0
+    for p in user_prefs:
+        core = p[:-1] if p.endswith("菜") and len(p) > 2 else p
+        if p in hay or core in hay:
+            hits += 1
     return hits / len(user_prefs)
 
 
@@ -94,7 +104,7 @@ def score_candidate(neighborhood, commute_times, venue, target_budget,
         "commute": commute_score(commute_times),
         "budget": budget_score(venue.get("cost"), target_budget),
         "rating": rating_score(venue.get("rating")),
-        "pref": pref_score(venue.get("tags"), user_prefs),
+        "pref": pref_score(venue, user_prefs),
     }
     total = sum(w[k] * parts[k] for k in w)
     detail = {
